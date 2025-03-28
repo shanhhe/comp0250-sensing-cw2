@@ -110,11 +110,6 @@ public:
   void
   pubFilteredPCMsg (ros::Publisher &pc_pub, PointC &pc);
 
-  /// @brief Function to calculate the orientation of the object.
-  /// @param cloud_input the input point cloud.
-  tf2::Quaternion 
-  getOrientation(PointCPtr &cloud_input);
-
   /// @brief Object projection.
   /// @param in_cloud_ptr (PointCPtr) the input PointCloud2 pointer.
   void
@@ -307,9 +302,6 @@ public:
 
   /// @brief define the vector stores the poses of clusters
   std::vector<geometry_msgs::Pose> cluster_poses;
-
-  /// @brief the rotation angle in task 1
-  double degree, rad;
 
   /// @brief parameters for the gripper
   double gripper_open_ = 80e-3;

@@ -83,18 +83,17 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
 
   // get the object type
-  type_task_1 = request.shape_type;
+  object_shape = request.shape_type;
 
   // get the object, goal and shape from request
   geometry_msgs::Point object_point = request.object_point.point;
   geometry_msgs::Point goal_point = request.goal_point.point;
-  std::string shape_type = request.shape_type;
 
   // define the object pose and goal pose
   geometry_msgs::Pose object_pose, goal_pose;
 
   detect_pose.position = object_point;
-  detect_pose.position.z += 0.5;
+  detect_pose.position.z += 0.3;
 
   double yaw = M_PI / 4;
   double pitch = M_PI;
@@ -104,40 +103,23 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   quaternion.setEulerZYX(yaw, pitch, roll);
   detect_pose.orientation = tf2::toMsg(quaternion);
 
-  tf2::Quaternion q_1(-1, 0, 0, 0), q_2, q_3;
-  q_2.setRPY(0, 0, M_PI / 4);
-  q_3.setRPY(0, 0, -M_PI / 4);
-  // q_2.setRPY(0, 0, 0);
-  geometry_msgs::Quaternion detect_orien = tf2::toMsg(q_1 * q_2);
-  // detect_pose.orientation = detect_orien;
-
   // move the robot to the detect pose
   bool success = false;
   success = moveArm(detect_pose);
 
   // open the gripper
   moveGripper(1.0);
-  if (success)
-  {
-    // when the robot move to the desired detect point, enable
-    // the segment plane trigger
-    task_1_trigger = true;
-  }
-  else
-  {
-    ROS_ERROR("Fail to achieve the trajectory!");
-  }
 
   // add the offset to the grasp pose
-  if (type_task_1 == "nought")
+  if (object_shape == "nought")
   {
-    detect_pose.position.x = detect_pose.position.x + sin(rad) * 0.08;
-    detect_pose.position.y = detect_pose.position.y + cos(rad) * 0.08;
+    detect_pose.position.x = detect_pose.position.x + 0.08;
+    detect_pose.position.y = detect_pose.position.y;
   }
-  else if (type_task_1 == "cross")
+  else if (object_shape == "cross")
   {
-    detect_pose.position.x = detect_pose.position.x + sin(rad) * 0.06;
-    detect_pose.position.y = detect_pose.position.y + cos(rad) * 0.06;
+    detect_pose.position.x = detect_pose.position.x;
+    detect_pose.position.y = detect_pose.position.y + 0.06;
   }
 
   detect_pose.position.z = 0.2;
@@ -148,14 +130,13 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   moveArm(detect_pose);
   // close the gripper
   moveGripper(0);
-  detect_pose.position.z = 0.4;
+  detect_pose.position.z = 0.3;
   // lift the object
   moveArm(detect_pose);
 
-  goal_pose.orientation = tf2::toMsg(q_1 * q_2);
+  goal_pose.orientation = tf2::toMsg(quaternion);
   goal_pose.position = goal_point;
-  goal_pose.position.y += 0.05;
-  goal_pose.position.z = 0.4;
+  goal_pose.position.z = 0.3;
   // move to the target point and release
   moveArm(goal_pose);
   moveGripper(1.0);
@@ -193,7 +174,7 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   detectPose.position = link2Cam(ref_1.position);
   targetPose.position = link2Cam(mystery.position);
   detectPose.position.z = 0.6;
-  targetPose.position.z = 0.6;
+  targetPose.position.z += 0.5;
 
   // define the flag ref_1_success to identify the trajectory
   bool ref_1_success = false;
@@ -549,90 +530,6 @@ void cw2::pubFilteredPCMsg(ros::Publisher &pc_pub, PointC &pc)
   // Publish the data
   pcl::toROSMsg(pc, g_cloud_filtered_msg);
   pc_pub.publish(g_cloud_filtered_msg);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-tf2::Quaternion cw2::getOrientation(PointCPtr &cloud_input)
-{
-  // calculate the max and min coordinate in the filted point cloud
-  PointT min_point, max_point;
-  pcl::getMinMax3D(*cloud_input, min_point, max_point);
-
-  // define the orientation and initialize
-  tf2::Quaternion q(-1, 0, 0, 0), q_rota, q_2, q_3;
-  q_2.setRPY(0, 0, M_PI / 4);
-  q_3.setRPY(0, 0, -M_PI / 4);
-  geometry_msgs::Point point_1;
-  double max_y = -100;
-  int count = 0;
-  double num_points = static_cast<double>(cloud_input->size());
-
-  if (type_task_1 == "nought")
-  {
-    for (int i = 0; i < num_points; ++i)
-    {
-      if (abs(cloud_input->points[i].y - max_point.y) < 0.008)
-      {
-        point_1.x += cloud_input->points[i].x;
-        point_1.y += cloud_input->points[i].y;
-        count += 1;
-      }
-    }
-
-    // calculate the target point for the orientation calculation
-    point_1.x = point_1.x / count;
-    point_1.y = point_1.y / count;
-
-    rad = atan2(point_1.y, point_1.x);
-    rad = abs(fmod(rad, M_PI_2));
-    degree = rad / M_PI * 180;
-    // for the nought, a 45 degrees offset need to be consider
-    degree = degree - 45;
-    // ensure the orientation is between 0 and pi/2
-    q_rota.setRPY(0, 0, abs(fmod(rad + M_PI_4, M_PI_2)));
-    // 45 degrees offset of the end effector
-    q_rota = q_rota * q_2;
-    // ensure the orientation is between 0 and pi/2
-    rad = abs(fmod(rad + M_PI_4, M_PI_2));
-  }
-  else if (type_task_1 == "cross")
-  {
-    for (int i = 1; i < num_points; ++i)
-    {
-      if (abs(cloud_input->points[i].y - max_point.y) < 0.005)
-      {
-        pcl::PointXYZ point_pre(cloud_input->points[i - 1].x, 
-                                cloud_input->points[i - 1].y, 
-                                cloud_input->points[i - 1].z);
-
-        pcl::PointXYZ point_after(cloud_input->points[i].x, 
-                                  cloud_input->points[i].y, 
-                                  cloud_input->points[i].z);
-
-        if (abs(pcl::euclideanDistance(point_pre, point_after)) < 0.05)
-        {
-          point_1.x += cloud_input->points[i].x;
-          point_1.y += cloud_input->points[i].y;
-          count += 1;
-        }
-      }
-    }
-
-    point_1.x = point_1.x / count;
-    point_1.y = point_1.y / count;
-
-    rad = atan2(point_1.y, point_1.x);
-    rad = abs(fmod(rad, M_PI_2));
-    degree = rad / M_PI * 180;
-    q_rota.setRPY(0, 0, (fmod(rad + M_PI_2, M_PI_2)) - M_PI_2);
-    q_rota = q_rota * q_2;
-    rad = abs(fmod(rad, M_PI_2));
-  }
-
-  // flip the end effector
-  q = q * q_rota;
-
-  return q;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
