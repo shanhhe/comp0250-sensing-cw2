@@ -283,7 +283,7 @@ public:
   tf2_ros::TransformListener tfListener{tfBuffer};
   
   /// @brief variable to store the object type for task_1
-  std::string type_task_1;
+  std::string object_shape;
 
   /// @brief quaternion of the object in task_1
   tf2::Quaternion q_object_task_1;
