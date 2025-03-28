@@ -13,6 +13,13 @@ int main(int argc, char **argv){
   // create an instance of the cw2 class
   cw2 cw_class(nh);
 
+  // Create a ROS subscriber for the input point cloud
+  ros::Subscriber sub_cloud =
+    nh.subscribe ("/r200/camera/depth_registered/points",
+                  1,
+                  &cw2::cloudCallBack,
+                  &cw_class);
+
   // MoveIt! requirement for non-blocking group.move()
   ros::AsyncSpinner spinner(1);
   spinner.start();
