@@ -108,7 +108,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   success = moveArm(detect_pose);
 
   // open the gripper
-  moveGripper(1.0);
+  moveGripper(1.2);
 
   // add the offset to the grasp pose
   if (object_shape == "nought")
@@ -130,7 +130,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   moveArm(detect_pose);
   // close the gripper
   moveGripper(0);
-  detect_pose.position.z = 0.3;
+  detect_pose.position.z = 0.5;
   // lift the object
   moveArm(detect_pose);
 
