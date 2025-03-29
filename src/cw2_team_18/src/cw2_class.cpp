@@ -155,72 +155,57 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   ROS_INFO("The coursework solving callback for task 2 has been triggered");
 
   // retrieve the positions of references
-  geometry_msgs::Pose ref_1, ref_2, mystery, detectPose, targetPose;
-  ref_1.position = request.ref_object_points[0].point;
-  ref_2.position = request.ref_object_points[1].point;
-  mystery.position = request.mystery_object_point.point;
-
+  geometry_msgs::Pose refPose, mysteryPose;
+  
   // object type of reference_1 and mytery
-  std::string ref_1_type, mystery_type;
+  std::string ref_type, mystery_type;
 
-  // define the rotation
-  tf2::Quaternion q_1(-1, 0, 0, 0), q_2;
-  q_2.setRPY(0, 0, M_PI / 4);
-  geometry_msgs::Quaternion detectOrien = tf2::toMsg(q_1 * q_2);
-  detectPose.orientation = detectOrien;
-  targetPose.orientation = detectOrien;
+  double yaw = M_PI;
+  double pitch = M_PI;
+  double roll = 0;
+
+  tf2::Quaternion quaternion;
+  quaternion.setEulerZYX(yaw, pitch, roll);
+
+  refPose.orientation = tf2::toMsg(quaternion);
+
+  mysteryPose.orientation = tf2::toMsg(quaternion);
 
   // transfer the frame for link_8 to camera frame
-  detectPose.position = link2Cam(ref_1.position);
-  targetPose.position = link2Cam(mystery.position);
-  detectPose.position.z = 0.6;
-  targetPose.position.z += 0.5;
+  refPose.position = link2Cam(request.ref_object_points[0].point);
+  mysteryPose.position = link2Cam(request.mystery_object_point.point);
+  refPose.position.z += 0.6;
+  mysteryPose.position.z += 0.6;
 
-  // define the flag ref_1_success to identify the trajectory
-  bool ref_1_success = false;
+  // define the flag refsuccess to identify the trajectory
+  bool refsuccess = false;
 
   // move to the myterty
-  ref_1_success = moveArm(targetPose);
-  if (ref_1_success)
+  refsuccess = moveArm(mysteryPose);
+
+  task_2_trigger = true; // trigger the task 2 callback
+  while (!recog_task_2)
   {
-    task_2_trigger = true; // trigger the task 2 callback
-    while (!recog_task_2)
-    {
-      // wait until the recognization finished
-    }
-    mystery_type = task_2_objectType;
-    ref_1_success = false;
-    recog_task_2 = false;
+    // wait until the recognization finished
   }
-  else
-  {
-    ROS_ERROR("Fail to achieve the trajectory!");
-  }
+  mystery_type = task_2_objectType;
+  refsuccess = false;
+  recog_task_2 = false;
+
 
   // move to the ahead of the first reference
-  ref_1_success = moveArm(detectPose);
-  if (ref_1_success)
-  {
-    task_2_trigger = true; // trigger the task 2 callback
-    while (!recog_task_2)
-    {
-      // wait until the recognization finished
-    }
-    ref_1_type = task_2_objectType;
-    ref_1_success = false;
-    recog_task_2 = false;
-  }
-  else
-  {
-    ROS_ERROR("Fail to achieve the trajectory!");
-  }
+  refsuccess = moveArm(refPose);
 
-  // cout << "##################################" << endl;
-  // cout << "ref_1 is " << ref_1_type << endl;
-  // cout << "mystery is " << mystery_type << endl;
-  // cout << "##################################" << endl;
+  task_2_trigger = true; // trigger the task 2 callback
+  while (!recog_task_2)
+  {
+    // wait until the recognization finished
+  }
+  ref_type = task_2_objectType;
+  refsuccess = false;
+  recog_task_2 = false;
 
-  if (ref_1_type == mystery_type)
+  if (ref_type == mystery_type)
   {
     response.mystery_object_num = 1;
   }
@@ -658,10 +643,6 @@ std::string cw2::getObjectType(PointCPtr &cloud_input)
   }
   recog_task_2 = true;
 
-  // cout << "##################################" << endl;
-  // cout << "number of points is " << num_points << endl;
-  // cout << "##################################" << endl;
-
   return type;
 }
 
@@ -793,7 +774,6 @@ void cw2::Cluster(PointCPtr &in_cloud_ptr)
   //   {
   //     // pubFilteredPCMsg(g_pub_rm_plane, *singal_cluster);
   //     projection(singal_cluster);
-  //     detectPose.position = link2Cam(findCylPose(g_cloud_projected_plane));
   //     detectPose.position.z = 0.4;
   //     cluster_poses.push_back(detectPose);
   //   }
