@@ -1,32 +1,29 @@
-/* feel free to change any part of this file, or delete this file. In general,
-you can do whatever you want with this template code, including deleting it all
-and starting from scratch. The only requirment is to make sure your entire
-solution is contained within the cw2_team_<your_team_number> package */
+/**
+**********************************************************************************
+* @file     cw2_class.cpp
+* @author   Colin Laganier, Jacob Nash, Carl Parsons
+* @date     2023-04-14
+* @brief   This file contains the constructor and methods for the cw2 class.
+*          The class advertises the services for the coursework tasks and 
+*          triggers the robot to perform the tasks.
+**********************************************************************************
+* @attention  Requires cw2_class header file.
+*/
 
-#include <cw2_class.h> // change to your team name here!
+#include <cw2_class.h>
 
-///////////////////////////////////////////////////////////////////////////////
-
-cw2::cw2(ros::NodeHandle nh) : g_cloud_ptr(new PointC),                                          // raw point cloud
-                               g_cloud_filtered_vx(new PointC),                                  // Voxel Grid filtered point cloud
-                               g_cloud_plane(new PointC),                                        // plane point cloud
-                               g_cloud_filtered_plane(new PointC),                               // point cloud exclude plane
-                               g_tree_ptr(new pcl::search::KdTree<PointT>),                      // KdTree
-                               g_cloud_normals(new pcl::PointCloud<pcl::Normal>),                // segmentation
-                               g_cloud_normals_filtered_plane(new pcl::PointCloud<pcl::Normal>), // segmentation
-                               g_inliers_plane(new pcl::PointIndices),                           // plane seg
-                               g_coeff_plane(new pcl::ModelCoefficients),                        // plane coeff
-                               g_coeff_plane_project(new pcl::ModelCoefficients()),              // coeff for projection
-                               g_cloud_projected_plane(new PointC)                               // projected object
+////////////////////////////////////////////////////////////////////////////////
+// Constructor
+////////////////////////////////////////////////////////////////////////////////
+cw2::cw2(ros::NodeHandle nh):
+  g_cloud_ptr (new PointC), // input point cloud
+  g_cloud_filtered (new PointC), // filtered point cloud
+  g_cloud_filtered2 (new PointC), // filtered point cloud
+  g_cloud_filtered_octomap (new PointC), // filtered point cloud for octomap
+  g_octomap_ptr (new pcl::PointCloud<pcl::PointXYZ>), // input octomap point cloud
+  g_octomap_filtered (new pcl::PointCloud<pcl::PointXYZ>) // filtered octomap point cloud
 {
-  // Voxel Grid:
-  g_vg_leaf_sz = 0.001f;
-
-  // Normal Estimation:
-  g_k_nn = 50;
-
   /* class constructor */
-
   nh_ = nh;
 
   // advertise solutions for coursework tasks
@@ -37,39 +34,52 @@ cw2::cw2(ros::NodeHandle nh) : g_cloud_ptr(new PointC),                         
   t3_service_  = nh_.advertiseService("/task3_start",
     &cw2::t3_callback, this);
 
-  // Define the publishers, which can visualize in rviz:
-  // point cloud exclude plane
-  g_pub_rm_plane = nh_.advertise<sensor_msgs::PointCloud2>("/1", 1, true); 
-  g_pub_rm_plane_2 = nh_.advertise<sensor_msgs::PointCloud2>("/2", 1, true);
+  // Define the publishers
+  g_pub_cloud = nh.advertise<sensor_msgs::PointCloud2> ("filtered_cloud", 1, true);
+  g_pub_pose = nh.advertise<geometry_msgs::PointStamped> ("cyld_pt", 1, true);
+  g_pub_cloud_octomap = nh.advertise<sensor_msgs::PointCloud2> ("octomap_cloud", 1, true);
+  g_pub_octomap = nh.advertise<sensor_msgs::PointCloud2> ("filtered_octomap_cloud", 1, true);
 
-  // Transformation from camera to panda link 8
-  try
-  {
-    TranCamera2Link8 = tfBuffer.lookupTransform("panda_link8", "rs200_camera", ros::Time(0));
-  }
-  catch (tf2::TransformException &ex)
-  {
-    ROS_WARN("%s", ex.what());
-  }
+  // Initialise ROS Subscribers //
+  image_sub_ = nh_.subscribe("/r200/camera/color/image_raw", 1, &cw2::colorImageCallback, this);
+  // Create a ROS subscriber for the input point cloud
+  cloud_sub_ = nh_.subscribe("/r200/camera/depth_registered/points", 1, &cw2::pointCloudCallback, this);
+  // Create a ROS subscriber for the octomap output cloud
+  octomap_pointcloud_sub_ = nh_.subscribe("/octomap_point_cloud_centers", 1, &cw2::octomapCallback, this);
 
-  // Transformation from panda link_8 to camera
-  try
-  {
-    TranLink82Cam = tfBuffer.lookupTransform("rs200_camera", "panda_link8", ros::Time(0));
-  }
-  catch (tf2::TransformException &ex)
-  {
-    ROS_WARN("%s", ex.what());
-  }
-
-  TranCamera2Link8.transform.translation.x = -TranLink82Cam.transform.translation.x;
-  TranCamera2Link8.transform.translation.y = -TranLink82Cam.transform.translation.y;
-  TranCamera2Link8.transform.translation.z = -TranLink82Cam.transform.translation.z;
-
-  // cout << TranLink82Cam << endl;
-  // cout << TranCamera2Link8 << endl;
+  load_config();
 
   ROS_INFO("cw2 class initialised");
+}
+
+void cw2::load_config()
+{
+  // Define constants identified experimentally 
+
+  // Pick and place constants
+  inspection_distance_ = 0.6;
+  // Angle offset to align gripper with cube
+  angle_offset_ = pi_ / 4.0;
+
+  drop_height_ = 0.30;
+  cross_pick_grid_y_offset_ = 0;
+  cross_pick_grid_x_offset_ = 2;
+  naught_pick_grid_x_offset_ = 2;
+  naught_pick_grid_y_offset_ = 2;
+
+  // Defining the Robot scanning position for task 3
+  scan_position_.x = 0.3773;
+  scan_position_.y = -0.0015;
+  scan_position_.z = 0.8773;
+
+  g_vg_leaf_sz = 0.01; // VoxelGrid leaf size: Better in a config file
+  g_pt_thrs_min = 0.0; // PassThrough min thres: Better in a config file
+  g_pt_thrs_max = 0.5; // PassThrough max thres: Better in a config file
+  g_k_nn = 50; // Normals nn size: Better in a config file
+
+  // Positions of the gripper for the different tasks 
+  camera_offset_ = 0.0425;
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -82,64 +92,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
 
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
 
-  // get the object type
-  object_shape = request.shape_type;
-
-  // get the object, goal and shape from request
-  geometry_msgs::Point object_point = request.object_point.point;
-  geometry_msgs::Point goal_point = request.goal_point.point;
-
-  // define the object pose and goal pose
-  geometry_msgs::Pose object_pose, goal_pose;
-
-  detect_pose.position = object_point;
-  detect_pose.position.z += 0.3;
-
-  double yaw = M_PI / 4;
-  double pitch = M_PI;
-  double roll = 0;
-
-  tf2::Quaternion quaternion;
-  quaternion.setEulerZYX(yaw, pitch, roll);
-  detect_pose.orientation = tf2::toMsg(quaternion);
-
-  // move the robot to the detect pose
-  bool success = false;
-  success = moveArm(detect_pose);
-
-  // open the gripper
-  moveGripper(1.2);
-
-  // add the offset to the grasp pose
-  if (object_shape == "nought")
-  {
-    detect_pose.position.x = detect_pose.position.x + 0.08;
-    detect_pose.position.y = detect_pose.position.y;
-  }
-  else if (object_shape == "cross")
-  {
-    detect_pose.position.x = detect_pose.position.x;
-    detect_pose.position.y = detect_pose.position.y + 0.06;
-  }
-
-  detect_pose.position.z = 0.2;
-  moveArm(detect_pose);
-  
-  // move to the grasp point
-  detect_pose.position.z = 0.15;
-  moveArm(detect_pose);
-  // close the gripper
-  moveGripper(0);
-  detect_pose.position.z = 0.5;
-  // lift the object
-  moveArm(detect_pose);
-
-  goal_pose.orientation = tf2::toMsg(quaternion);
-  goal_pose.position = goal_point;
-  goal_pose.position.z = 0.3;
-  // move to the target point and release
-  moveArm(goal_pose);
-  moveGripper(1.0);
+  bool success = task_1(request.object_point.point, request.goal_point.point, request.shape_type);
 
   return true;
 }
@@ -154,69 +107,9 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
 
   ROS_INFO("The coursework solving callback for task 2 has been triggered");
 
-  // retrieve the positions of references
-  geometry_msgs::Pose refPose, mysteryPose;
-  
-  // object type of reference_1 and mytery
-  std::string ref_type, mystery_type;
+  int64_t mystery_object_num = task_2(request.ref_object_points, request.mystery_object_point);
 
-  double yaw = M_PI;
-  double pitch = M_PI;
-  double roll = 0;
-
-  tf2::Quaternion quaternion;
-  quaternion.setEulerZYX(yaw, pitch, roll);
-
-  refPose.orientation = tf2::toMsg(quaternion);
-
-  mysteryPose.orientation = tf2::toMsg(quaternion);
-
-  // transfer the frame for link_8 to camera frame
-  refPose.position = link2Cam(request.ref_object_points[0].point);
-  mysteryPose.position = link2Cam(request.mystery_object_point.point);
-  refPose.position.z += 0.6;
-  mysteryPose.position.z += 0.6;
-
-  // define the flag refsuccess to identify the trajectory
-  bool refsuccess = false;
-
-  // move to the myterty
-  refsuccess = moveArm(mysteryPose);
-
-  task_2_trigger = true; // trigger the task 2 callback
-  while (!recog_task_2)
-  {
-    // wait until the recognization finished
-  }
-  mystery_type = task_2_objectType;
-  refsuccess = false;
-  recog_task_2 = false;
-
-
-  // move to the ahead of the first reference
-  refsuccess = moveArm(refPose);
-
-  task_2_trigger = true; // trigger the task 2 callback
-  while (!recog_task_2)
-  {
-    // wait until the recognization finished
-  }
-  ref_type = task_2_objectType;
-  refsuccess = false;
-  recog_task_2 = false;
-
-  if (ref_type == mystery_type)
-  {
-    response.mystery_object_num = 1;
-  }
-  else
-  {
-    response.mystery_object_num = 2;
-  }
-
-  cout << "##################################" << endl;
-  cout << "the response is " << response.mystery_object_num << endl;
-  cout << "##################################" << endl;
+  response.mystery_object_num = mystery_object_num;
 
   return true;
 }
@@ -231,101 +124,230 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
 
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
 
-  // initialize
-  cluster_poses.clear();
+  std::tuple<uint64_t, uint64_t> responses = task_3();
 
-  geometry_msgs::Pose detec_1, detec_2, detec_3, detec_4,
-      detec_5, detec_6;
-
-  std::vector<geometry_msgs::Pose> detection;
-
-  // define the rotation
-  tf2::Quaternion q_1(-1, 0, 0, 0), q_2, q_3;
-  q_2.setRPY(0, 0, M_PI / 4);
-  q_3.setRPY(0, 0, -M_PI / 4);
-  geometry_msgs::Quaternion detect_Orien_1 = tf2::toMsg(q_1 * q_2);
-  geometry_msgs::Quaternion detect_Orien_2 = tf2::toMsg(q_1 * q_3);
-
-  // define the detect points
-  detec_1.position.x = 0.32;
-  detec_1.position.y = 0.12;
-  detec_1.position.z = 0.8;
-  detec_1.orientation = detect_Orien_1;
-  detection.push_back(detec_1);
-
-  detec_2.position.x = 0.32;
-  detec_2.position.y = -0.12;
-  detec_2.position.z = 0.8;
-  detec_2.orientation = detect_Orien_1;
-  detection.push_back(detec_2);
-
-  detec_6.position.x = 0;
-  detec_6.position.y = -0.3;
-  detec_6.position.z = 0.8;
-  detec_6.orientation = detect_Orien_2;
-  detection.push_back(detec_6);
-
-  detec_3.position.x = -0.32;
-  detec_3.position.y = -0.12;
-  detec_3.position.z = 0.8;
-  detec_3.orientation = detect_Orien_1;
-  detection.push_back(detec_3);
-
-  detec_4.position.x = -0.32;
-  detec_4.position.y = 0.12;
-  detec_4.position.z = 0.8;
-  detec_4.orientation = detect_Orien_1;
-  detection.push_back(detec_4);
-
-  detec_5.position.x = 0;
-  detec_5.position.y = 0.3;
-  detec_5.position.z = 0.8;
-  detec_5.orientation = detect_Orien_2;
-  detection.push_back(detec_5);
-
-  bool success = false;
-  int numb_detection = 1;
-  // int numb_detection = detection.size();
-
-  for (int i = 0; i < numb_detection; i++)
-  {
-    success = moveArm(detection[i]);
-    if (success)
-    {
-      task_3_trigger = true; // trigger the task 3 callback
-      success = false;
-    }
-    else
-    {
-      ROS_ERROR("Fail to achieve the trajectory!");
-    }
-
-    while (!cluster_task_3)
-    {
-      // wait until the cluster in task 3 finished
-    }
-    cluster_task_3 = false;
-
-    for (int j = 0; j < cluster_poses.size(); j++)
-    {
-      // moveArm(cluster_poses[j]);
-    }
-  }
-
-  // moveArm(detec_1);
-  // moveArm(detec_2);
-  // moveArm(detec_6);
-  // moveArm(detec_3);
-  // moveArm(detec_4);
-  // moveArm(detec_5);
+  response.total_num_shapes = std::get<0>(responses);
+  response.num_most_common_shape = std::get<1>(responses);
 
   return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// fuction definition
 
-bool cw2::moveArm(geometry_msgs::Pose target_pose)
+void
+cw2::pointCloudCallback
+  (const sensor_msgs::PointCloud2ConstPtr &cloud_input_msg)
+{
+  // Extract inout point cloud info
+  g_input_pc_frame_id_ = cloud_input_msg->header.frame_id;
+    
+  // Convert to PCL data type
+  pcl_conversions::toPCL (*cloud_input_msg, g_pcl_pc);
+  pcl::fromPCLPointCloud2 (g_pcl_pc, *g_cloud_ptr);
+
+  // Apply task specific filter
+  if (task_1_filter)
+  {
+    nought_filter.setMin(Eigen::Vector4f(-0.13, 0.05, 0.45, 1.0));
+    nought_filter.setMax(Eigen::Vector4f(0.13, 0.4, 0.51, 1.0));
+    nought_filter.setInputCloud(g_cloud_ptr);
+    nought_filter.filter(*g_cloud_filtered);
+
+    cross_filter.setInputCloud(g_cloud_ptr);
+    cross_filter.setFilterFieldName("z");
+    cross_filter.setFilterLimits(0.45, 0.51);
+    cross_filter.filter(*g_cloud_filtered2);
+
+    pubFilteredPCMsg(g_pub_cloud, *g_cloud_filtered2);
+  }
+  else if (task_3_filter)
+  {
+    applyFilterTask3(g_cloud_ptr, g_cloud_filtered_octomap);
+    pubFilteredPCMsg(g_pub_cloud_octomap, *g_cloud_filtered_octomap);
+  }
+  
+  return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Point Cloud callback helper functions
+////////////////////////////////////////////////////////////////////////////////
+
+void
+cw2::pubFilteredPCMsg (ros::Publisher &pc_pub,
+                                PointC &pc)
+{
+  /* This function publishes the filtered pointcloud */
+
+  // Publish the data
+  pcl::toROSMsg(pc, g_cloud_filtered_msg);
+  pc_pub.publish (g_cloud_filtered_msg);
+  
+  return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void
+cw2::applyFilterTask3(PointCPtr &in_cloud_ptr,
+                      PointCPtr &out_cloud_ptr)
+{
+  /* Function applying the pass through filter */
+
+  g_pt.setInputCloud(in_cloud_ptr);
+  
+  // Enlarging the x limits to include the whole plane
+  g_pt.setFilterFieldName ("x");
+  g_pt.setFilterLimits(-1.0, 1.0);
+
+  // Restricting the z limits to the top of the cubes
+  g_pt.setFilterFieldName("z");
+  g_pt.setFilterLimits (g_pt_thrs_min, g_pt_thrs_max);
+  
+  g_pt.filter (*out_cloud_ptr);
+  
+  return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void
+cw2::colorImageCallback(const sensor_msgs::Image& msg)
+{
+  /* This is the callback function for the RGB camera subscriber */ 
+  
+  // Setting up the static variables at the first callback 
+  static bool setup = [&](){
+        // Camera feed resolution
+        cw2::color_image_width_ = msg.width;
+        cw2::color_image_height_ = msg.height;
+
+        // Computing the index of the middle pixel
+        cw2::color_image_midpoint_ = cw2::color_channels_ * ((cw2::color_image_width_ * 
+          (cw2::color_image_height_ / 2)) + (cw2::color_image_width_ / 2)) - cw2::color_channels_;
+
+        return true;
+    } ();
+
+  this->color_image_data = msg.data;
+
+  return;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void
+cw2::octomapCallback
+  (const sensor_msgs::PointCloud2ConstPtr &cloud_input_msg)
+{
+  g_octomap_frame_id_ = cloud_input_msg->header.frame_id;
+
+  // Convert ROS message to PCL point cloud
+  pcl_conversions::toPCL(*cloud_input_msg, g_octomap_pc);
+  pcl::fromPCLPointCloud2 (g_octomap_pc, *g_octomap_ptr);
+
+  // Create the filtering object
+  g_octomap_pt.setInputCloud(g_octomap_ptr);
+  g_octomap_pt.setFilterFieldName("z");
+  g_octomap_pt.setFilterLimits(0.04, 0.5);
+  g_octomap_pt.filter(*g_octomap_filtered);
+
+  // Convert PCL point cloud to ROS message
+  pcl::toROSMsg(*g_octomap_filtered, g_octomap_filtered_msg);
+  g_pub_octomap.publish(g_octomap_filtered_msg);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+bool 
+cw2::task_1(geometry_msgs::Point object, 
+            geometry_msgs::Point target, 
+            std::string shape_type)
+{
+  // define the object pose and goal pose
+  geometry_msgs::Pose object_pose, goal_pose;
+
+  object_pose.position = object;
+  object_pose.position.z += 0.3;
+
+  double yaw = M_PI / 4;
+  double pitch = M_PI;
+  double roll = 0;
+
+  tf2::Quaternion quaternion;
+  quaternion.setEulerZYX(yaw, pitch, roll);
+  object_pose.orientation = tf2::toMsg(quaternion);
+
+  // move the robot to the detect pose
+  bool success = false;
+  success = moveArm(object_pose);
+
+  // open the gripper
+  moveGripper(1.2);
+
+  // add the offset to the grasp pose
+  if (shape_type == "nought")
+  {
+    object_pose.position.x = object_pose.position.x + 0.08;
+    object_pose.position.y = object_pose.position.y;
+  }
+  else if (shape_type == "cross")
+  {
+    object_pose.position.x = object_pose.position.x;
+    object_pose.position.y = object_pose.position.y + 0.06;
+  }
+
+  object_pose.position.z = 0.4;
+  moveArm(object_pose);
+  
+  // move to the grasp point
+  object_pose.position.z = 0.15;
+  moveArm(object_pose);
+  // close the gripper
+  moveGripper(0);
+  object_pose.position.z = 0.5;
+  // lift the object
+  moveArm(object_pose);
+
+  goal_pose.orientation = tf2::toMsg(quaternion);
+  goal_pose.position = target;
+  goal_pose.position.z = 0.5;
+  // move to the target point and release
+  moveArm(goal_pose);
+  moveGripper(1.0);
+
+  return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Task 1 helper functions
+////////////////////////////////////////////////////////////////////////////////
+
+geometry_msgs::Pose
+cw2::point2Pose(geometry_msgs::Point point, double rotation){
+  /* This function produces a "gripper facing down" pose given a xyz point */
+
+  // Position gripper above point
+  tf2::Quaternion q_x180deg(-1, 0, 0, 0);
+  // Gripper Orientation
+  tf2::Quaternion q_object;
+  q_object.setRPY(0, 0, angle_offset_ + rotation);
+  tf2::Quaternion q_result = q_x180deg * q_object;
+  geometry_msgs::Quaternion orientation = tf2::toMsg(q_result);
+
+  // set the desired Pose
+  geometry_msgs::Pose pose;
+  pose.position = point;
+  pose.orientation = orientation;
+
+  return pose;
+}
+////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////
+
+bool
+cw2::moveArm(geometry_msgs::Pose target_pose)
 {
   /* This function moves the move_group to the target position */
 
@@ -337,9 +359,8 @@ bool cw2::moveArm(geometry_msgs::Pose target_pose)
   ROS_INFO("Attempting to plan the path");
   moveit::planning_interface::MoveGroupInterface::Plan my_plan;
   bool success = (arm_group_.plan(my_plan) ==
-                  moveit::planning_interface::MoveItErrorCode::SUCCESS);
+    moveit::planning_interface::MoveItErrorCode::SUCCESS);
 
-  // google 'c++ conditional operator' to understand this line
   ROS_INFO("Visualising plan %s", success ? "" : "FAILED");
 
   // execute the planned path
@@ -348,15 +369,19 @@ bool cw2::moveArm(geometry_msgs::Pose target_pose)
   return success;
 }
 
-////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
-bool cw2::moveGripper(float width)
+bool
+cw2::moveGripper(float width)
 {
-  // safety checks in case width exceeds safe values
-  if (width > gripper_open_)
-    width = gripper_open_;
-  if (width < gripper_closed_)
-    width = gripper_closed_;
+  /* this function moves the gripper fingers to a new position. Joints are:
+      - panda_finger_joint1
+      - panda_finger_joint2
+  */
+
+  // safety checks
+  if (width > gripper_open_) width = gripper_open_;
+  if (width < gripper_closed_) width = gripper_closed_;
 
   // calculate the joint targets as half each of the requested distance
   double eachJoint = width / 2.0;
@@ -373,414 +398,400 @@ bool cw2::moveGripper(float width)
   ROS_INFO("Attempting to plan the path");
   moveit::planning_interface::MoveGroupInterface::Plan my_plan;
   bool success = (hand_group_.plan(my_plan) ==
-                  moveit::planning_interface::MoveItErrorCode::SUCCESS);
+    moveit::planning_interface::MoveItErrorCode::SUCCESS);
 
   ROS_INFO("Visualising plan %s", success ? "" : "FAILED");
 
-  // move the gripper joints
   hand_group_.move();
 
   return success;
 }
 
-///////////////////////////////////////////////////////////////////////////////
-
-void cw2::cloudCallBack(const sensor_msgs::PointCloud2ConstPtr &cloud_input_msg)
-{
-  /////////////////////////////////////////////////////////////////////////
-  //////////////////// callback for task 2 ////////////////////////////////
-  /////////////////////////////////////////////////////////////////////////
-  if (task_2_trigger)
-  {
-    // Extract inout point cloud info
-    g_input_pc_frame_id_ = cloud_input_msg->header.frame_id;
-
-    // Convert to PCL data type
-    pcl_conversions::toPCL(*cloud_input_msg, g_pcl_pc);
-    pcl::fromPCLPointCloud2(g_pcl_pc, *g_cloud_ptr);
-
-    // downsampling the point cloud
-    applyVX(g_cloud_ptr, g_cloud_filtered_vx);
-
-    // segment the plane:
-    findNormals(g_cloud_filtered_vx); // store in g_cloud_normals
-    // g_cloud_filtered_plane inside this function is the PC without plane
-    segPlane(g_cloud_filtered_vx);
-
-    // project the filtered pointC on the plane
-    projection(g_cloud_filtered_plane);
-
-    // pass through filter
-    double thres = 0.02;
-    applyPT_x(g_cloud_projected_plane, g_cloud_projected_plane, thres);
-    applyPT_y(g_cloud_projected_plane, g_cloud_projected_plane, thres);
-
-    // publish the pointC
-    pubFilteredPCMsg(g_pub_rm_plane, *g_cloud_projected_plane);
-
-    task_2_objectType = getObjectType(g_cloud_projected_plane);
-
-    task_2_trigger = false;
-  }
-
-  /////////////////////////////////////////////////////////////////////////
-  //////////////////// callback for task 3 ////////////////////////////////
-  /////////////////////////////////////////////////////////////////////////
-  if (task_3_trigger)
-  {
-    // Extract inout point cloud info
-    g_input_pc_frame_id_ = cloud_input_msg->header.frame_id;
-
-    // Convert to PCL data type
-    pcl_conversions::toPCL(*cloud_input_msg, g_pcl_pc);
-    pcl::fromPCLPointCloud2(g_pcl_pc, *g_cloud_ptr);
-
-    // downsampling the point cloud
-    applyVX(g_cloud_ptr, g_cloud_filtered_vx);
-
-    // segment the plane:
-    findNormals(g_cloud_filtered_vx); // store in g_cloud_normals
-    // g_cloud_filtered_plane inside this function is the PC without plane
-    segPlane(g_cloud_filtered_vx);
-
-    pubFilteredPCMsg(g_pub_rm_plane_2, *g_cloud_filtered_plane);
-
-    // projection(g_cloud_filtered_plane);
-    // pubFilteredPCMsg(g_pub_rm_plane, *g_cloud_projected_plane);
-
-    Cluster(g_cloud_filtered_plane);
-
-    task_3_trigger = false;
-  }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void cw2::applyVX(PointCPtr &in_cloud_ptr, PointCPtr &out_cloud_ptr)
-{
-  g_vx.setInputCloud(in_cloud_ptr);
-  g_vx.setLeafSize(g_vg_leaf_sz, g_vg_leaf_sz, g_vg_leaf_sz);
-  g_vx.filter(*out_cloud_ptr);
-}
-
-/////////////  /* find normal, seg plane and find pose *////////////////////
-
-void cw2::findNormals(PointCPtr &in_cloud_ptr)
-{
-  // Estimate point normals
-  g_ne.setInputCloud(in_cloud_ptr);
-  g_ne.setSearchMethod(g_tree_ptr);
-  g_ne.setKSearch(g_k_nn);
-  g_ne.compute(*g_cloud_normals);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void cw2::segPlane(PointCPtr &in_cloud_ptr)
-{
-  // Create the segmentation object for the planar model
-  // and set all the params
-  g_seg.setOptimizeCoefficients(true);
-  g_seg.setModelType(pcl::SACMODEL_NORMAL_PLANE);
-  g_seg.setNormalDistanceWeight(0.0001); // bad style
-  g_seg.setMethodType(pcl::SAC_RANSAC);
-  g_seg.setMaxIterations(1000);     // bad style
-  g_seg.setDistanceThreshold(0.03); // bad style
-  g_seg.setInputCloud(in_cloud_ptr);
-  g_seg.setInputNormals(g_cloud_normals);
-  // Obtain the plane inliers and coefficients
-  g_seg.segment(*g_inliers_plane, *g_coeff_plane);
-
-  // Extract the planar inliers from the input cloud
-  g_extract_pc.setInputCloud(in_cloud_ptr);
-  g_extract_pc.setIndices(g_inliers_plane);
-  g_extract_pc.setNegative(false);
-
-  // Write the planar inliers to disk
-  g_extract_pc.filter(*g_cloud_plane);
-
-  // Remove the planar inliers, extract the rest
-  g_extract_pc.setNegative(true);
-  g_extract_pc.filter(*g_cloud_filtered_plane);
-  g_extract_normals.setNegative(true);
-  g_extract_normals.setInputCloud(g_cloud_normals);
-  g_extract_normals.setIndices(g_inliers_plane);
-  g_extract_normals.filter(*g_cloud_normals_filtered_plane);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void cw2::pubFilteredPCMsg(ros::Publisher &pc_pub, PointC &pc)
-{
-  // Publish the data
-  pcl::toROSMsg(pc, g_cloud_filtered_msg);
-  pc_pub.publish(g_cloud_filtered_msg);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-void cw2::projection(PointCPtr &in_cloud_ptr)
-{
-  g_coeff_plane_project->values.resize(4);
-  g_coeff_plane_project->values[0] = 0;    // plane normal x
-  g_coeff_plane_project->values[1] = 0;    // plane normal y
-  g_coeff_plane_project->values[2] = 1;    // plane normal z
-  g_coeff_plane_project->values[3] = -0.6; // plane distance from origin
-
-  proj.setInputCloud(in_cloud_ptr);
-  proj.setModelType(pcl::SACMODEL_PLANE);
-  proj.setModelCoefficients(g_coeff_plane_project);
-  proj.filter(*g_cloud_projected_plane);
-
-  // pubFilteredPCMsg(g_pub_rm_plane, *g_cloud_projected_plane);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-geometry_msgs::Point cw2::findCylPose(PointCPtr &in_cloud_ptr)
-{
-  Eigen::Vector4f centroid_in;
-  pcl::compute3DCentroid(*in_cloud_ptr, centroid_in);
-
-  g_cyl_pt_msg.header.frame_id = g_input_pc_frame_id_;
-  g_cyl_pt_msg.header.stamp = ros::Time(0);
-  g_cyl_pt_msg.point.x = centroid_in[0];
-  g_cyl_pt_msg.point.y = centroid_in[1];
-  g_cyl_pt_msg.point.z = centroid_in[2];
-
-  // Transform the point to new frame
-  geometry_msgs::PointStamped g_cyl_pt_msg_out;
-  try
-  {
-    g_listener_.transformPoint("panda_link0", // bad styling
-                               g_cyl_pt_msg,
-                               g_cyl_pt_msg_out);
-    // ROS_INFO ("trying transform...");
-  }
-  catch (tf::TransformException &ex)
-  {
-    ROS_ERROR("Received a trasnformation exception: %s", ex.what());
-  }
-
-  geometry_msgs::Point result;
-  result.x = g_cyl_pt_msg_out.point.x;
-  result.y = g_cyl_pt_msg_out.point.y;
-  result.z = g_cyl_pt_msg_out.point.z;
-
-  return result;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-geometry_msgs::Point cw2::link2Cam(geometry_msgs::Point in_point)
-{
-  // initialise
-  geometry_msgs::PointStamped point_link, point_cam;
-  tf2::Quaternion q_0(0, 0, 0, 1);
-  TranLink82Cam.transform.rotation = tf2::toMsg(q_0);
-  point_link.point = in_point;
-  tf2::doTransform(point_link, point_cam, TranLink82Cam);
-
-  return point_cam.point;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-geometry_msgs::Point cw2::cam2Link(geometry_msgs::Point in_point)
-{
-  // intialise
-  geometry_msgs::PointStamped point_link, point_cam;
-  tf2::Quaternion q_0(0, 0, 0, 1);
-  TranCamera2Link8.transform.rotation = tf2::toMsg(q_0);
-  point_cam.point = in_point;
-  tf2::doTransform(point_cam, point_link, TranCamera2Link8);
-
-  return point_link.point;
-}
 
 ////////////////////////////////////////////////////////////////////////////////
-
-void cw2::applyPT_x(PointCPtr &in_cloud_ptr,
-                    PointCPtr &out_cloud_ptr, double &threshold)
-{
-  double g_pt_thrs = threshold;
-  g_pt.setInputCloud(in_cloud_ptr);
-  g_pt.setFilterFieldName("x");
-  g_pt.setFilterLimits(-g_pt_thrs, g_pt_thrs);
-  g_pt.filter(*out_cloud_ptr);
-
-  return;
-}
-
+// Task 2
 ////////////////////////////////////////////////////////////////////////////////
 
-void cw2::applyPT_y(PointCPtr &in_cloud_ptr,
-                    PointCPtr &out_cloud_ptr, double &threshold)
-{
-  double g_pt_thrs = threshold;
-  g_pt.setInputCloud(in_cloud_ptr);
-  g_pt.setFilterFieldName("y");
-  g_pt.setFilterLimits(-g_pt_thrs, g_pt_thrs);
-  g_pt.filter(*out_cloud_ptr);
+int64_t
+cw2::task_2(std::vector<geometry_msgs::PointStamped> ref, geometry_msgs::PointStamped mystery){
 
-  return;
+  // Initialise output string
+  std::string output_string = "Reference Shape 1: ";
+
+  // Inspect first reference shape
+  std::string ref_shape_1 = survey(ref[0].point);
+  output_string += ref_shape_1;
+  output_string += " | Reference Shape 2: ";
+
+  // Infer second reference shape
+  std::string ref_shape_2;
+  if (ref_shape_1 == "nought"){
+    ref_shape_2 = "cross";
+  }else{
+    ref_shape_2 = "nought";
+  }
+  output_string += ref_shape_2;
+  output_string += " | Mystery Shape: ";
+
+  // Inspect mystery shape
+  std::string mystery_shape = survey(mystery.point);
+  output_string += mystery_shape;
+  int64_t mystery_object_num;
+  if (mystery_shape == ref_shape_1){
+    mystery_object_num = 1;
+  }else{
+    mystery_object_num = 2;
+  }
+
+  // Print results
+  ROS_INFO("/////////////////////////////////////////////////////////////////////");
+  ROS_INFO("%s", output_string.c_str());
+  ROS_INFO("/////////////////////////////////////////////////////////////////////");
+
+  return mystery_object_num;
 }
 
 
+////////////////////////////////////////////////////////////////////////////////
+// Task 2 helper functions
+////////////////////////////////////////////////////////////////////////////////
+
+
+std::string
+cw2::survey(geometry_msgs::Point point){
+
+  // Define imaging pose
+  geometry_msgs::Pose image_pose = point2Pose(point);
+  image_pose.position.z += 0.3; //Offset above object
+  image_pose.position.x -= 0.04; // Offset of camera from end-effector
+
+  // Move camera above shape
+  bool success = moveArm(image_pose);
+  // Extract central pixel values from raw RGB data
+  int redValue = color_image_data[color_image_midpoint_];
+  int greenValue = color_image_data[color_image_midpoint_ + 1];
+  int blueValue = color_image_data[color_image_midpoint_ + 2];
+  
+  // Determine shape
+  std::string shape;
+  // Nought
+  if (greenValue > redValue && greenValue > blueValue){
+    shape = "nought";
+    ROS_INFO("NOUGHT");}
+  // Cross
+  else{
+    shape = "cross";
+    ROS_INFO("CROSS");}
+  return shape;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
-std::string cw2::getObjectType(PointCPtr &cloud_input)
+// Task 3
+///////////////////////////////////////////////////////////////////////////////
+
+std::tuple<uint64_t, uint64_t>
+cw2::task_3()
 {
-  std::string type;
-  type = "error";
+  // Scan the environment for objects and obstacles
+  scanEnvironment();
 
-  // retrieve the number of points of input pointC
-  double num_points = static_cast<double>(cloud_input->size());
+  ROS_INFO("Starting to cluster");
+  ROS_INFO("11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd11111111d43434343123123123123123111dfddddd");
 
-  if (num_points == 0)
+  // Create snapshot of point cloud for processing
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+  copyPointCloud(*g_octomap_filtered, *cloud);
+
+  // Cluster the point cloud into separate objects
+  std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters = clusterPointclouds(cloud);
+
+  ROS_INFO("Finished clustering");
+
+  // Initializing the object positions vectors
+  std::vector<geometry_msgs::Point> object_positions;
+  std::vector<geometry_msgs::Point> obstacle_positions;
+  std::vector<geometry_msgs::Point> cross_positions;
+  std::vector<geometry_msgs::Point> nought_positions;
+  geometry_msgs::Point basket_position;
+
+  for (auto cluster : clusters)
   {
-    type = "nought";
+    // Compute the centroid of the cluster
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cluster, centroid);
+
+    // Create a point to store the centroid position
+    geometry_msgs::Point centroid_position;
+
+    // Round to 3 decimal places
+    centroid_position.x = std::round(centroid[0] * position_precision_) / position_precision_;
+    centroid_position.y = std::round(centroid[1] * position_precision_) / position_precision_;
+    centroid_position.z = 0;
+
+    // Ignore the centroid if it is at the origin
+    if (centroid_position.x < 0.1 && centroid_position.x > -0.1 && centroid_position.y < 0.1 && centroid_position.y > -0.1)
+    {
+      continue;
+    }
+
+    ROS_INFO("Object centroid: (%f, %f, %f)", centroid_position.x, centroid_position.y, centroid_position.z);
+
+    pcl::PointXYZ min_point, max_point;
+    pcl::getMinMax3D(*cluster, min_point, max_point);
+    ROS_INFO("Object dimensions: (%f, %f, %f)", max_point.x - min_point.x, max_point.y - min_point.y, max_point.z - min_point.z);
+
+    // Identify the basket
+    if (max_point.x - min_point.x > 0.25 && max_point.y - min_point.y > 0.25)
+    {
+      basket_position = centroid_position;
+    }
+    else
+    {
+      // Compute the width for pick and place
+      double width = getClusterWidth(cluster)/5.0;
+
+      // Add the centroid position to the vector
+      object_positions.push_back(centroid_position);
+    }
+
+  }
+
+  // Sort the object positions
+  for (auto object : object_positions)
+  {
+    // Move the arm to the object
+    geometry_msgs::Point target = object;
+    target.x = target.x - camera_offset_; // Offset of camera from end-effector
+    target.y = target.y;
+    target.z = 0.5;
+    geometry_msgs::Pose target_pose = point2Pose(target);
+    moveArm(target_pose);
+
+    // Identify the object
+    Object target_obj = identifyObject();
+
+    if (target_obj == Object::obstacle)
+    {
+      obstacle_positions.push_back(object);
+    }
+    else if (target_obj == Object::basket)
+    {
+      basket_position = object;
+    }
+    else if (target_obj == Object::cross)
+    {
+      cross_positions.push_back(object);
+    }
+    else if (target_obj == Object::nought)
+    {
+      nought_positions.push_back(object);
+    }
+
+    // add delay
+    ros::Duration(1.0).sleep();
+  }
+
+  if (cross_positions.size() > nought_positions.size())
+  {
+    geometry_msgs::Point target = cross_positions.back();
+    bool success = task_1(target, basket_position, "cross");
+
+    ROS_INFO("/////////////////////////////////////////////////////////////////////");
+    ROS_INFO_STREAM("Number of objects: " << cross_positions.size() + nought_positions.size());
+    ROS_INFO_STREAM("Number of crosses: " << cross_positions.size());
+    ROS_INFO("/////////////////////////////////////////////////////////////////////");
+
+
+    return std::make_tuple(cross_positions.size() + nought_positions.size(), cross_positions.size());
   }
   else
   {
-    type = "cross";
+    geometry_msgs::Point target = nought_positions.back();
+    bool success = task_1(target, basket_position, "nought");
+
+    ROS_INFO("/////////////////////////////////////////////////////////////////////");
+    ROS_INFO_STREAM("Number of objects: " << cross_positions.size() + nought_positions.size());
+    ROS_INFO_STREAM("Number of noughts: " << nought_positions.size());
+    ROS_INFO("/////////////////////////////////////////////////////////////////////");
+
+    return std::make_tuple(cross_positions.size() + nought_positions.size(), nought_positions.size());
   }
-  recog_task_2 = true;
-
-  return type;
 }
-
-///////////////////////////////////////////////////////////////////////////////
-void cw2::Cluster(PointCPtr &in_cloud_ptr)
-{
-  ROS_INFO("start clustering");
-
-  // pcl::octree::OctreePointCloud<PointT> octree(0.0001);
-  // boost::shared_ptr<const pcl::PointCloud<PointT>> input_cloud_boost_ptr =
-  //     boost::const_pointer_cast<const pcl::PointCloud<PointT>>(in_cloud_ptr);
-  // octree.setInputCloud(input_cloud_boost_ptr);
-  // octree.addPointsFromInputCloud();
-  // pcl::octree::OctreePointCloud<PointT>::AlignedPointTVector clusters;
-  // octree.getOccupiedVoxelCenters(clusters);
-
-  pcl::search::Octree<PointT>::Ptr Octree_ptr(new pcl::search::Octree<PointT>(0.005));
-  Octree_ptr->setInputCloud(in_cloud_ptr);
-
-  std::vector<pcl::PointIndices> cluster_indices_task_3;
-  cluster_indices_task_3.clear();
-
-  // use k-means to cluster the filtered point cloud, and get the indices
-  g_tree_ptr->setInputCloud(in_cloud_ptr);
-  pcl::EuclideanClusterExtraction<PointT> g_ec;
-  g_ec.setClusterTolerance(0.03);
-  g_ec.setMinClusterSize(100);
-  g_ec.setMaxClusterSize(5000);
-  g_ec.setSearchMethod(Octree_ptr);
-  g_ec.setInputCloud(in_cloud_ptr);
-  g_ec.extract(cluster_indices_task_3);
-
-  // pcl::RegionGrowingRGB<PointT, pcl::Normal> seg;
-  // findNormals(in_cloud_ptr);
-  // seg.setInputCloud(in_cloud_ptr);
-  // seg.setInputNormals(g_cloud_normals);
-  // seg.setSearchMethod(g_tree_ptr);
-  // seg.setDistanceThreshold(0.0001f);
-  // seg.setRegionColorThreshold(1);
-  // seg.setMaxClusterSize(10000);
-  // seg.setMinClusterSize(300);
-  // seg.extract(cluster_indices_task_3);
-
-  // findNormals(in_cloud_ptr);
-  // pcl::RegionGrowing<PointT, pcl::Normal> reg;
-  // reg.setMinClusterSize (50);
-  // reg.setMaxClusterSize (10000);
-  // reg.setSearchMethod (g_tree_ptr);
-  // reg.setNumberOfNeighbours (30);
-  // reg.setInputCloud (in_cloud_ptr);
-  // //reg.setIndices (indices);
-  // reg.setInputNormals (g_cloud_normals);
-  // reg.setSmoothnessThreshold (3.0 / 180.0 * M_PI);
-  // reg.setCurvatureThreshold (1.0);
-  // reg.extract (cluster_indices_task_3);
-
-  cout << "##################################" << endl;
-  cout << "number of clusters is " << cluster_indices_task_3.size() << endl;
-  // cout << "number of clusters is " << clusters.size() << endl;
-  cout << "##################################" << endl;
-
-  pcl::PointIndices::Ptr singal_cluster_ptr(new pcl::PointIndices);
-  PointCPtr singal_cluster(new PointC);
-
-  geometry_msgs::Pose detectPose;
-  tf2::Quaternion q_1(-1, 0, 0, 0), q_2;
-  q_2.setRPY(0, 0, M_PI / 4);
-  geometry_msgs::Quaternion detectOrien = tf2::toMsg(q_1 * q_2);
-  detectPose.orientation = detectOrien;
-
-  *singal_cluster_ptr = cluster_indices_task_3[0];
-  g_extract_pc.setInputCloud(in_cloud_ptr);
-  g_extract_pc.setIndices(singal_cluster_ptr);
-  g_extract_pc.filter(*singal_cluster);
-  pubFilteredPCMsg(g_pub_rm_plane, *singal_cluster);
-
-  *singal_cluster_ptr = cluster_indices_task_3[1];
-  g_extract_pc.setInputCloud(in_cloud_ptr);
-  g_extract_pc.setIndices(singal_cluster_ptr);
-  g_extract_pc.filter(*singal_cluster);
-  // pubFilteredPCMsg(g_pub_rm_plane_2, *singal_cluster);
-
-  // for (int i = 0; i < cluster_indices_task_3.size(); i++)
-  // {
-  //   *singal_cluster_ptr = cluster_indices_task_3[i];
-  //   g_extract_pc.setInputCloud(in_cloud_ptr);
-  //   g_extract_pc.setIndices(singal_cluster_ptr);
-  //   g_extract_pc.filter(*singal_cluster);
-
-  //   pubFilteredPCMsg(g_pub_rm_plane, *singal_cluster);
-
-  //   cout << "##################################" << endl;
-  //   cout << "position " << findCylPose(singal_cluster) << endl;
-  //   cout << "##################################" << endl;
-
-  //   // initialize the r, g, b data
-  //   int r = 0;
-  //   int g = 0;
-  //   int b = 0;
-  //   uint32_t rgba;
-  //   // retrieve the RGB data
-  //   for (int j = 0; j < (*singal_cluster).points.size(); j++)
-  //   {
-  //     rgba = (*singal_cluster).points[j].rgba;
-  //     uint8_t uint8_r = (rgba >> 16) & 0x0000ff;
-  //     uint8_t uint8_g = (rgba >> 8) & 0x0000ff;
-  //     uint8_t uint8_b = (rgba)&0x0000ff;
-  //     uint8_t uint8_a = (rgba >> 24) & 0x000000ff;
-
-  //     r = r + uint8_r;
-  //     g = g + uint8_g;
-  //     b = b + uint8_b;
-  //   }
-  //   // take the average number of rgb of the image area
-  //   r = r / (*singal_cluster).points.size();
-  //   g = g / (*singal_cluster).points.size();
-  //   b = b / (*singal_cluster).points.size();
-
-  //   std::cout << "////////////////////////////////////////////" << std::endl;
-  //   std::cout << "cluster " << i + 1 << std::endl;
-  //   std::cout << "number of points = " << (*singal_cluster).points.size() << std::endl;
-  //   std::cout << "r = " << r / 255.0 << std::endl;
-  //   std::cout << "g = " << g / 255.0 << std::endl;
-  //   std::cout << "b = " << b / 255.0 << std::endl;
-  //   std::cout << "////////////////////////////////////////////" << std::endl;
-
-  //   if ((!(r / 255.0 < 0.12 && g / 255.0 < 0.12 && b / 255.0 < 0.12)) &&
-  //       ((*singal_cluster).points.size() >= 9000))
-  //   {
-  //     // pubFilteredPCMsg(g_pub_rm_plane, *singal_cluster);
-  //     projection(singal_cluster);
-  //     detectPose.position.z = 0.4;
-  //     cluster_poses.push_back(detectPose);
-  //   }
-  // }
-
-  cluster_task_3 = true;
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
+// Task 3 helper functions
+////////////////////////////////////////////////////////////////////////////////
+
+std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>
+cw2::clusterPointclouds(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud)
+{
+  /* Function clustering point clouds in individual groups */
+
+  // Vector to store the clusters
+  std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> clusters;
+
+  // Create the KdTree object for the search method of the extraction
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+  tree->setInputCloud(cloud);
+
+  // Create a set of indices to be used in the extraction
+  std::vector<pcl::PointIndices> cluster_indices;
+  // Create the extraction object for the clusters
+  pcl::EuclideanClusterExtraction<pcl::PointXYZ> cluster_extraction;
+  // Set the extraction parameters
+  cluster_extraction.setClusterTolerance(0.04); // 4cm
+  cluster_extraction.setMinClusterSize(50);  
+  cluster_extraction.setMaxClusterSize(10000);
+  cluster_extraction.setSearchMethod(tree);
+  cluster_extraction.setInputCloud(cloud);
+  cluster_extraction.extract(cluster_indices);
+
+  // Loop through each cluster and store it in the vector
+  for (const auto& cluster : cluster_indices)
+  {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>);
+    for (const auto& idx : cluster.indices) {
+      cloud_cluster->push_back((*cloud)[idx]);
+    }
+    cloud_cluster->width = cloud_cluster->size ();
+    cloud_cluster->height = 1;
+    cloud_cluster->is_dense = true;
+    ROS_INFO("PointCloud representing the Cluster: %lu data points.", cloud_cluster->size());
+    clusters.push_back(cloud_cluster);
+  }
+
+  return clusters;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void
+cw2::scanEnvironment()
+{
+  geometry_msgs::Point reset_point;
+  reset_point.x = 0.5;
+  reset_point.y = 0.0;
+  reset_point.z = 0.5;
+  geometry_msgs::Pose reset_pose = point2Pose(reset_point);
+  bool reset_success = moveArm(reset_pose);
+
+  // set speed of arm
+  // arm_group_.setMaxVelocityScalingFactor(0.05);
+
+  // Create corners of scan area
+  geometry_msgs::Point corner1;
+  corner1.x = -0.50;
+  corner1.y = -0.40;
+  corner1.z = 0.6;
+  geometry_msgs::Point corner2;
+  corner2.x = 0.50;
+  corner2.y = -0.40;
+  corner2.z = 0.65;
+  geometry_msgs::Point corner3;
+  corner3.x = 0.50;
+  corner3.y = 0.30;
+  corner3.z = 0.6;
+  geometry_msgs::Point corner4;
+  corner4.x = -0.50;
+  corner4.y = 0.30;
+  corner4.z = 0.6;
+
+  // Add corners to a vector
+  std::vector<geometry_msgs::Point> corners;
+  corners.push_back(corner1);
+  corners.push_back(corner2);
+  corners.push_back(corner3);
+  corners.push_back(corner4);
+  corners.push_back(corner1);
+
+  // Set constant gripper angle
+  double angle = -1.5708;
+  int num_steps = 4;
+
+  geometry_msgs::Pose pose;
+  geometry_msgs::Point distance;
+  geometry_msgs::Point step;
+  bool success;
+
+  for (int i = 0; i < corners.size() - 1; i++)
+  { 
+    // Move arm to corner position
+    pose = point2Pose(corners.at(i), angle);
+    success = moveArm(pose);
+
+    // Enable filter when arm is in position
+    if (i == 0)
+      task_3_filter = true;
+
+    // Initialise variable to store distance between points
+    distance.x = corners.at(i).x - corners.at(i+1).x;
+    distance.y = corners.at(i).y - corners.at(i+1).y;
+    distance.z = 0;
+    
+    for (int j = 1; j < num_steps - 1; j++)
+    {
+      // Calculate step distance
+      step.x = corners.at(i).x - (j * distance.x / num_steps);
+      step.y = corners.at(i).y - (j * distance.y / num_steps);
+      step.z = corners.at(i).z;
+
+      ROS_INFO("Step: (%f, %f, %f)", step.x, step.y, step.z);
+
+      // Move arm to step position
+      pose = point2Pose(step, angle);
+      success = moveArm(pose);
+
+      if (i == 3 && j == 2)
+        j++;
+    }
+  }
+  ros::Duration(1.0).sleep();
+
+  // Disable filter when scan is complete
+  task_3_filter = false;
+  // Reset the arm velocity
+  // arm_group_.setMaxVelocityScalingFactor(0.1);
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+cw2::Object
+cw2::identifyObject()
+{
+  int redValue = color_image_data[color_image_midpoint_];
+  int greenValue = color_image_data[color_image_midpoint_ + 1];
+  int blueValue = color_image_data[color_image_midpoint_ + 2];
+
+  ROS_INFO("red: %d, green: %d, blue: %d", redValue, greenValue, blueValue);
+
+  if (redValue < 50 && greenValue < 50 && blueValue < 50)
+  {
+    return Object::obstacle;
+  }
+  else if (greenValue > redValue && greenValue > blueValue)
+  {
+    return Object::nought;
+  }
+  else 
+  {
+    return Object::cross;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+double 
+cw2::getClusterWidth(pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
+{
+  pcl::MomentOfInertiaEstimation <pcl::PointXYZ> feature_extractor;
+  feature_extractor.setInputCloud(cluster);
+  feature_extractor.compute();
+
+  // Camera space bounding box
+  pcl::PointXYZ min_point_AABB;
+  pcl::PointXYZ max_point_AABB;
+  
+  feature_extractor.getAABB(min_point_AABB, max_point_AABB);
+  return max_point_AABB.x - min_point_AABB.x; 
+}
